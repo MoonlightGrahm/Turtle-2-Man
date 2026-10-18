@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Turtle Classic — 2-Man Better Ball</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Turtle 2-Man">
+<meta name="mobile-web-app-capable" content="yes">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  html,body{ background:#0a100c; color:#e6efe8; }
+  body{ font-family:'Inter',sans-serif; }
+  .font-display{ font-family:'Space Grotesk',sans-serif; }
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button{ -webkit-appearance:none; margin:0; }
+  input[type=number]{ -moz-appearance:textfield; }
+  .card{ background:#101a14; border:1px solid #1f3024; border-radius:14px; }
+  .fld{ width:100%; background:#0e1712; border:1px solid #24352a; border-radius:8px; padding:6px 8px; font-size:13px; color:#e6efe8; }
+  .btn{ border:1px solid #243527; background:#16241b; color:#c9d8cd; border-radius:10px; padding:8px 12px; font-size:13px; font-weight:600; }
+  .btn.on{ background:#3fae6a; color:#0a100c; border-color:#3fae6a; }
+  .btn.warn{ border-color:#7a2f2f; color:#f0a0a0; }
+  .stroke-dot{ display:inline-block; width:7px; height:7px; border-radius:50%; background:#d9b25c; margin-left:3px; }
+  ::-webkit-scrollbar{ height:6px; width:6px; } ::-webkit-scrollbar-thumb{ background:#2a3a30; border-radius:4px; }
+</style>
+</head>
+<body>
+<div id="app" class="max-w-xl mx-auto pb-24"></div>
+<script>
+/* =========================================================
+   CONFIG — own table & channel so this event never touches the main Turtle Classic data.
+   ========================================================= */
+const SUPABASE_URL = window.ENV_SUPABASE_URL || "https://tjxabpammppdqoyznxae.supabase.co/";
+const SUPABASE_ANON_KEY = window.ENV_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRqeGFicGFtbXBwZHFveXpueGFlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc2NTY4OTYsImV4cCI6MjEwMzIzMjg5Nn0.vaDc-FkBn22aul1oOghw0ab-c2LyguShML0qK3sNi1Q";
+const SUPABASE_TABLE = window.ENV_SUPABASE_TABLE || "twoman_state";
+const SUPABASE_CHANNEL = window.ENV_SUPABASE_CHANNEL || "twoman_channel";
+const CLOUD_ROW_ID = 1;
+const LS_KEY = 'turtleTwoManState_v1';
+const ADMIN_KEY = 'turtleTwoManAdmin_v1';
+const OPTOUT_KEY = 'turtleTwoManCloudOptOut_v1';
+
+/* =========================================================
+   STATE
+   ========================================================= */
+const DEFAULT_PARS = [4,4,3,5,4,4,3,4,5, 4,5,3,4,4,4,3,5,4];
+const DEFAULT_SIS  = [7,13,17,1,9,5,15,11,3, 8,2,16,10,4,12,18,6,14];
+function defaultState(){
+  return {
+    v:1, title:'Turtle Classic — 2-Man Better Ball', allowancePct:80, passcode:'1234',
+    courses:[{ id:'c1', name:'Course (edit in Admin)', rating:71.5, slope:125, pars:DEFAULT_PARS.slice(), sis:DEFAULT_SIS.slice() }],
+    rounds:[ { id:'r1', name:'Saturday', courseId:'c1' }, { id:'r2', name:'Sunday', courseId:'c1' } ],
+    teams:[], scores:{}, nextId:1,
+  };
+}
+let STATE = defaultState();
+const UI = { tab:'board', metric:'net', round:'r1', team:null, hole:0, adminTab:'teams' };
+let adminAuthenticated = false;
+try{ adminAuthenticated = sessionStorage.getItem(ADMIN_KEY)==='1'; }catch(e){}
+
+function emptyHoles(){ return Array.from({length:18}, ()=>({a:'',b:''})); }
+function ensureScores(){
+  STATE.rounds.forEach(r=>{
+    if(!STATE.scores[r.id]) STATE.scores[r.id] = {};
+    STATE.teams.forEach(t=>{
+      const arr = STATE.scores[r.id][t.id];
+      if(!Array.isArray(arr) || arr.length!==18) STATE.scores[r.id][t.id] = emptyHoles();
+    });
+  });
+}
+function normalizeState(s){
+  const d = defaultState();
+  const out = Object.assign(d, s||{});
+  if(!Array.isArray(out.courses) || !out.courses.length) out.courses = d.courses;
+  out.courses.forEach(c=>{
+    if(!Array.isArray(c.pars)||c.pars.length!==18) c.pars = DEFAULT_PARS.slice();
+    if(!Array.isArray(c.sis)||c.sis.length!==18) c.sis = DEFAULT_SIS.slice();
+  });
+  if(!Array.isArray(out.rounds) || !out.rounds.length) out.rounds = d.rounds;
+  if(!Array.isArray(out.teams)) out.teams = [];
+  if(!out.scores || typeof out.scores!=='object') out.scores = {};
+  return out;
+}
+function uid(prefix){ return prefix + (STATE.nextId++) + '_' + Math.random().toString(36).slice(2,5); }
+
+/* =========================================================
+   GOLF MATH
+   ========================================================= */
+const courseById = id => STATE.courses.find(c=>c.id===id) || STATE.courses[0];
+const roundById = id => STATE.rounds.find(r=>r.id===id) || STATE.rounds[0];
+function courseHcp(index, course){
+  const par = course.pars.reduce((a,b)=>a+b,0);
+  return Math.round((Number(index)||0) * (course.slope/113) + (course.rating - par));
+}
+// Allowance % of the Course Handicap, rounded. Each player plays off their own number.
+function playingHcp(index, course){
+  return Math.round(courseHcp(index, course) * (STATE.allowancePct/100));
+}
+function strokesOnHole(hcp, si){
+  if(hcp==null || hcp<=0) return 0;
+  const base = Math.floor(hcp/18), rem = hcp - base*18;
+  return base + (si <= rem ? 1 : 0);
+}
+const num = v => (v===''||v==null||isNaN(Number(v))) ? null : Number(v);
+
+// Returns per-hole detail + totals for one team in one round.
+function evalTeamRound(team, round){
+  const course = courseById(round.courseId);
+  const holes = (STATE.scores[round.id]||{})[team.id] || emptyHoles();
+  const ph = team.players.map(p=>playingHcp(p.hcp, course));
+  const detail = []; let gross=0, net=0, par=0, thru=0;
+  for(let i=0;i<18;i++){
+    const h = holes[i] || {a:'',b:''};
+    const ga = num(h.a), gb = num(h.b);
+    const na = ga==null?null:ga - strokesOnHole(ph[0], course.sis[i]);
+    const nb = gb==null?null:gb - strokesOnHole(ph[1], course.sis[i]);
+    const gBest = (ga==null&&gb==null)?null:Math.min(...[ga,gb].filter(x=>x!=null));
+    const nBest = (na==null&&nb==null)?null:Math.min(...[na,nb].filter(x=>x!=null));
+    detail.push({ga,gb,na,nb,gBest,nBest,par:course.pars[i],si:course.sis[i]});
+    if(nBest!=null){ gross+=gBest; net+=nBest; par+=course.pars[i]; thru++; }
+  }
+  return { detail, gross, net, par, thru, ph, course };
+}
+function evalTeam(team){
+  const rounds = STATE.rounds.map(r=>({ round:r, ...evalTeamRound(team, r) }));
+  const tot = rounds.reduce((a,r)=>({gross:a.gross+r.gross, net:a.net+r.net, par:a.par+r.par, thru:a.thru+r.thru}), {gross:0,net:0,par:0,thru:0});
+  return { team, rounds, ...tot };
+}
+function fmtPar(n){ return n===0 ? 'E' : (n>0 ? '+'+n : String(n)); }
+function leaderboard(){
+  const key = UI.metric==='gross' ? 'gross' : 'net';
+  const rows = STATE.teams.map(evalTeam).map(r=>({ ...r, toPar: r[key]-r.par, score:r[key] }));
+  rows.sort((a,b)=>{
+    if(a.thru===0 && b.thru!==0) return 1;
+    if(b.thru===0 && a.thru!==0) return -1;
+    return (a.toPar-b.toPar) || (b.thru-a.thru) || a.team.name.localeCompare(b.team.name);
+  });
+  let rank=0;
+  rows.forEach((r,i)=>{
+    if(i>0 && r.thru>0 && r.toPar===rows[i-1].toPar){ r.rank=rows[i-1].rank; r.tied=true; rows[i-1].tied=true; }
+    else { r.rank=i+1; r.tied=false; }
+  });
+  return rows;
+}
+
+/* =========================================================
+   PERSISTENCE + SUPABASE SYNC (optimistic, last-write-wins, single row)
+   ========================================================= */
+let supabaseClient=null, supabaseChannel=null, cloudStatus='local', cloudError='';
+let cloudSyncTimer=null, retryTimer=null, pendingLocalChange=false, outboxPending=false, applyingRemote=false, queuedRemote=null;
+
+function saveLocal(){ try{ localStorage.setItem(LS_KEY, JSON.stringify(STATE)); }catch(e){} }
+function loadLocal(){
+  try{ const raw = localStorage.getItem(LS_KEY); if(raw) STATE = normalizeState(JSON.parse(raw)); }catch(e){}
+  ensureScores();
+}
+function commit(rerender=true){
+  saveLocal();
+  pushCloud();
+  if(rerender) render();
+}
+async function pushCloud(immediate){
+  if(!supabaseClient || applyingRemote) return;
+  pendingLocalChange = true;
+  const doPush = async ()=>{
+    try{
+      const { error } = await supabaseClient.from(SUPABASE_TABLE).upsert({ id:CLOUD_ROW_ID, data:STATE, updated_at:new Date().toISOString() });
+      if(error) throw error;
+      outboxPending=false; pendingLocalChange=false; clearTimeout(retryTimer);
+      if(cloudStatus!=='connected'){ cloudStatus='connected'; cloudError=''; render(); }
+    }catch(e){
+      outboxPending=true; cloudStatus = navigator.onLine ? 'error':'offline'; cloudError = e.message||'Push failed — retrying';
+      clearTimeout(retryTimer); retryTimer=setTimeout(()=>{ if(outboxPending&&supabaseClient) pushCloud(true); }, 4000);
+      render();
+    }
+  };
+  if(immediate) return doPush();
+  clearTimeout(cloudSyncTimer); cloudSyncTimer = setTimeout(doPush, 500);
+}
+function isTyping(){
+  const el = document.activeElement;
+  return !!(el && (el.tagName==='INPUT'||el.tagName==='SELECT'||el.tagName==='TEXTAREA') && el.id!=='adminPass');
+}
+function applyRemote(data){
+  if(isTyping()){ queuedRemote = data; return; }
+  applyingRemote = true;
+  try{ STATE = normalizeState(data); ensureScores(); saveLocal(); render(); }
+  finally{ applyingRemote = false; }
+}
+function flushQueued(){ if(queuedRemote && !isTyping()){ const d=queuedRemote; queuedRemote=null; applyRemote(d); } }
+function subscribeRealtime(){
+  if(!supabaseClient) return;
+  if(supabaseChannel){ try{ supabaseClient.removeChannel(supabaseChannel); }catch(e){} }
+  supabaseChannel = supabaseClient.channel(SUPABASE_CHANNEL)
+    .on('postgres_changes', { event:'*', schema:'public', table:SUPABASE_TABLE, filter:`id=eq.${CLOUD_ROW_ID}` }, payload=>{
+      if(!(payload.new && payload.new.data)) return;
+      if(pendingLocalChange) return;
+      applyRemote(payload.new.data);
+    })
+    .subscribe(status=>{ if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'){ cloudStatus='error'; cloudError='Realtime dropped'; render(); } });
+}
+async function pullFresh(){
+  if(!supabaseClient) return;
+  try{
+    const { data, error } = await supabaseClient.from(SUPABASE_TABLE).select('data').eq('id',CLOUD_ROW_ID).maybeSingle();
+    if(error) throw error;
+    if(data && data.data) applyRemote(data.data);
+  }catch(e){}
+}
+async function connect(){
+  let optOut=false; try{ optOut = localStorage.getItem(OPTOUT_KEY)==='1'; }catch(e){}
+  if(optOut || !SUPABASE_URL || !SUPABASE_ANON_KEY) { render(); return; }
+  if(!window.supabase || !window.supabase.createClient){ cloudStatus='error'; cloudError='Supabase SDK failed to load'; render(); return; }
+  cloudStatus='connecting'; render();
+  try{
+    const client = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const { data, error } = await client.from(SUPABASE_TABLE).select('data').eq('id',CLOUD_ROW_ID).maybeSingle();
+    if(error) throw error;
+    supabaseClient = client;
+    if(data && data.data){ applyRemote(data.data); }
+    else { await pushCloud(true); }
+    subscribeRealtime();
+    cloudStatus='connected'; cloudError=''; render();
+    clearTimeout(cloudSyncTimer);
+  }catch(e){
+    supabaseClient=null; cloudStatus='error';
+    cloudError = (e.message||'Could not reach Supabase') + ' — does table "'+SUPABASE_TABLE+'" exist? (see Admin → Setup)';
+    render();
+  }
+}
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && supabaseClient) pullFresh(); });
+window.addEventListener('online', async ()=>{ if(supabaseClient){ await pullFresh(); if(outboxPending) pushCloud(true); } });
+
+/* =========================================================
+   HELPERS
+   ========================================================= */
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function statusPill(){
+  const map = { connected:['#3fae6a','Live'], connecting:['#d9b25c','Connecting…'], error:['#e06060','Sync error'], offline:['#d9b25c','Offline — queued'], local:['#7f9689','Local only'] };
+  const [c,t] = map[cloudStatus]||map.local;
+  return `<span class="inline-flex items-center gap-1 text-[11px]" style="color:${c}"><span style="width:7px;height:7px;border-radius:50%;background:${c};display:inline-block"></span>${t}</span>`;
+}
+
+/* =========================================================
+   VIEWS
+   ========================================================= */
+function render(){
+  const app = document.getElementById('app');
+  if(!app) return;
+  try{
+    const tabs = [['board','Leaderboard'],['score','Scores'],['admin', adminAuthenticated ? 'Admin' : 'Admin 🔒']];
+    app.innerHTML = `
+    <header class="px-4 pt-5 pb-3 sticky top-0 z-10" style="background:#0a100c">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <h1 class="font-display text-xl font-bold leading-tight">🐢 ${esc(STATE.title)}</h1>
+          <div class="mt-0.5">${statusPill()}</div>
+        </div>
+      </div>
+      <nav class="flex gap-2 mt-3">
+        ${tabs.map(([k,l])=>`<button data-action="tab" data-tab="${k}" class="btn flex-1 ${UI.tab===k?'on':''}">${l}</button>`).join('')}
+      </nav>
+      ${cloudStatus==='error' ? `<p class="text-[11px] mt-2" style="color:#e9a0a0">${esc(cloudError)}</p>`:''}
+    </header>
+    <main class="px-4 space-y-4">
+      ${UI.tab==='board' ? viewBoard() : UI.tab==='score' ? viewScore() : viewAdmin()}
+    </main>
+    <div id="modalRoot"></div>`;
+  }catch(e){
+    console.error(e);
+    app.innerHTML = `<div class="p-6 text-sm">Something went wrong rendering. <button class="btn" data-action="tab" data-tab="board">Back to Leaderboard</button><pre class="text-[10px] mt-3 opacity-60">${esc(e.message)}</pre></div>`;
+  }
+}
+
+function viewBoard(){
+  if(!STATE.teams.length) return `<div class="card p-5 text-sm text-[#9db3a4]">No teams yet. Open <b>Admin</b> to add teams.</div>`;
+  const rows = leaderboard();
+  const r0 = STATE.rounds;
+  return `
+  <div class="flex gap-2">
+    <button data-action="metric" data-m="net" class="btn flex-1 ${UI.metric==='net'?'on':''}">Net</button>
+    <button data-action="metric" data-m="gross" class="btn flex-1 ${UI.metric==='gross'?'on':''}">Gross</button>
+  </div>
+  <div class="space-y-2">
+    ${rows.map(r=>`
+    <div class="card p-3">
+      <div class="flex items-center gap-3">
+        <div class="font-display text-2xl font-bold w-12 text-center" style="color:${r.rank===1&&r.thru>0?'#d9b25c':'#e6efe8'}">${r.thru>0?(r.tied?'T':'')+r.rank:'–'}</div>
+        <div class="flex-1 min-w-0">
+          <div class="font-semibold truncate">${esc(r.team.name)}</div>
+          <div class="text-[11px] text-[#7f9689] truncate">${esc(r.team.players[0].name||'Player 1')} &amp; ${esc(r.team.players[1].name||'Player 2')}</div>
+        </div>
+        <div class="text-right">
+          <div class="font-display text-xl font-bold">${r.thru>0?fmtPar(r.toPar):'–'}</div>
+          <div class="text-[11px] text-[#7f9689]">${r.thru>0?r.score+' · thru '+r.thru+'/'+(18*r0.length):'not started'}</div>
+        </div>
+      </div>
+      <div class="flex gap-2 mt-2 text-[11px] text-[#9db3a4]">
+        ${r.rounds.map(x=>{ const v=UI.metric==='gross'?x.gross:x.net; return `<div class="flex-1 rounded-lg px-2 py-1" style="background:#0e1712">${esc(x.round.name)}: <b class="text-[#e6efe8]">${x.thru?v:'–'}</b>${x.thru?` (${fmtPar(v-x.par)})`:''}${x.thru&&x.thru<18?` thru ${x.thru}`:''}</div>`; }).join('')}
+      </div>
+    </div>`).join('')}
+  </div>
+  <p class="text-[11px] text-[#66786b]">Ranked by ${UI.metric} score to par over all rounds (better-ball: lower of the two partners each hole). Net uses ${STATE.allowancePct}% of each player's Course Handicap.</p>`;
+}
+
+function viewScore(){
+  if(!STATE.teams.length) return `<div class="card p-5 text-sm text-[#9db3a4]">No teams yet. Add teams in <b>Admin</b>.</div>`;
+  if(!STATE.rounds.find(r=>r.id===UI.round)) UI.round = STATE.rounds[0].id;
+  if(!STATE.teams.find(t=>t.id===UI.team)) UI.team = STATE.teams[0].id;
+  const round = roundById(UI.round), team = STATE.teams.find(t=>t.id===UI.team);
+  const ev = evalTeamRound(team, round);
+  const h = Math.max(0, Math.min(17, UI.hole));
+  const d = ev.detail[h], raw = STATE.scores[round.id][team.id][h];
+  const chipBg = i => { const x=ev.detail[i]; return x.nBest!=null ? '#1c3a28' : '#16241b'; };
+  return `
+  <div class="flex gap-2">
+    ${STATE.rounds.map(r=>`<button data-action="round" data-id="${r.id}" class="btn flex-1 ${UI.round===r.id?'on':''}">${esc(r.name)}</button>`).join('')}
+  </div>
+  <select data-action="team-select" class="fld" style="font-size:15px;padding:10px">
+    ${STATE.teams.map(t=>`<option value="${t.id}" ${t.id===UI.team?'selected':''}>${esc(t.name)} — ${esc(t.players[0].name||'P1')} &amp; ${esc(t.players[1].name||'P2')}</option>`).join('')}
+  </select>
+  <div class="flex flex-wrap gap-1.5">
+    ${Array.from({length:18},(_,i)=>`<button data-action="hole" data-i="${i}" class="rounded-lg text-xs font-semibold" style="width:34px;height:34px;background:${i===h?'#3fae6a':chipBg(i)};color:${i===h?'#0a100c':'#c9d8cd'};border:1px solid #243527">${i+1}</button>`).join('')}
+  </div>
+  <div class="card p-4">
+    <div class="flex items-baseline justify-between">
+      <div class="font-display text-2xl font-bold">Hole ${h+1}</div>
+      <div class="text-sm text-[#9db3a4]">Par ${d.par} · SI ${d.si}</div>
+    </div>
+    <div class="mt-3 space-y-3">
+      ${[0,1].map(pi=>{
+        const f = pi===0?'a':'b', st = strokesOnHole(ev.ph[pi], d.si), val = raw[f];
+        return `
+        <div class="flex items-center gap-2">
+          <div class="flex-1 min-w-0">
+            <div class="font-semibold truncate">${esc(team.players[pi].name||('Player '+(pi+1)))}</div>
+            <div class="text-[11px] text-[#7f9689]">Plays off ${ev.ph[pi]} ${st?Array.from({length:st},()=>'<span class="stroke-dot"></span>').join(''):''}</div>
+          </div>
+          <button data-action="adj" data-f="${f}" data-d="-1" class="btn" style="width:46px;height:46px;font-size:20px">−</button>
+          <div class="font-display text-3xl font-bold text-center" style="width:44px">${val===''?'–':val}</div>
+          <button data-action="adj" data-f="${f}" data-d="1" class="btn" style="width:46px;height:46px;font-size:20px">+</button>
+          <button data-action="par" data-f="${f}" class="btn" style="height:46px">PAR</button>
+          <button data-action="clr" data-f="${f}" class="btn" style="height:46px" title="Clear">✕</button>
+        </div>`; }).join('')}
+    </div>
+    <div class="mt-3 text-sm text-[#9db3a4]">Team this hole: ${d.gBest!=null?`<b class="text-[#e6efe8]">${d.gBest}</b> gross · <b class="text-[#e6efe8]">${d.nBest}</b> net`:'—'}</div>
+    <div class="flex gap-2 mt-3">
+      <button data-action="hole" data-i="${Math.max(0,h-1)}" class="btn flex-1" ${h===0?'disabled style="opacity:.4"':''}>← Prev</button>
+      <button data-action="hole" data-i="${Math.min(17,h+1)}" class="btn flex-1 on" ${h===17?'disabled style="opacity:.4"':''}>Next →</button>
+    </div>
+  </div>
+  <div class="card p-3 overflow-x-auto">
+    <table class="text-[11px] w-full text-center" style="min-width:560px">
+      <tr class="text-[#7f9689]"><td class="text-left">Hole</td>${ev.detail.map((x,i)=>`<td>${i+1}</td>`).join('')}<td>Tot</td></tr>
+      <tr class="text-[#7f9689]"><td class="text-left">Par</td>${ev.detail.map(x=>`<td>${x.par}</td>`).join('')}<td>${ev.course.pars.reduce((a,b)=>a+b,0)}</td></tr>
+      <tr><td class="text-left">${esc(team.players[0].name||'P1')}</td>${ev.detail.map(x=>`<td>${x.ga==null?'':x.ga}</td>`).join('')}<td></td></tr>
+      <tr><td class="text-left">${esc(team.players[1].name||'P2')}</td>${ev.detail.map(x=>`<td>${x.gb==null?'':x.gb}</td>`).join('')}<td></td></tr>
+      <tr class="font-semibold"><td class="text-left">Net</td>${ev.detail.map(x=>`<td>${x.nBest==null?'':x.nBest}</td>`).join('')}<td>${ev.thru?ev.net:''}</td></tr>
+    </table>
+  </div>
+  <p class="text-[11px] text-[#66786b]">Enter each player's gross score. Better ball uses the lower net of the two partners. Gold dots = handicap stroke on this hole.</p>`;
+}
+
+function viewAdmin(){
+  if(!adminAuthenticated) return `
+  <div class="card p-5 space-y-3">
+    <div class="font-semibold">Admin passcode</div>
+    <input id="adminPass" type="password" inputmode="numeric" class="fld" placeholder="Passcode" style="font-size:16px"/>
+    <button data-action="admin-login" class="btn on w-full">Unlock</button>
+    <p id="adminErr" class="text-xs" style="color:#e9a0a0"></p>
+  </div>`;
+  const sub = [['teams','Teams'],['rounds','Rounds & Courses'],['setup','Setup']];
+  return `
+  <div class="flex gap-2">${sub.map(([k,l])=>`<button data-action="admin-tab" data-t="${k}" class="btn flex-1 ${UI.adminTab===k?'on':''}">${l}</button>`).join('')}</div>
+  ${UI.adminTab==='teams' ? adminTeams() : UI.adminTab==='rounds' ? adminRounds() : adminSetup()}
+  <button data-action="admin-lock" class="btn w-full">Lock Admin</button>`;
+}
+function adminTeams(){
+  return `
+  <div class="space-y-2">
+    ${STATE.teams.map((t,ti)=>`
+    <div class="card p-3 space-y-2">
+      <div class="flex gap-2"><input class="fld" data-edit="team-name" data-t="${t.id}" value="${esc(t.name)}" placeholder="Team name"/><button data-action="del-team" data-t="${t.id}" class="btn warn">Delete</button></div>
+      ${[0,1].map(pi=>`<div class="flex gap-2">
+        <input class="fld" data-edit="p-name" data-t="${t.id}" data-p="${pi}" value="${esc(t.players[pi].name)}" placeholder="Player ${pi+1} name"/>
+        <input class="fld" style="width:90px" type="number" step="0.1" data-edit="p-hcp" data-t="${t.id}" data-p="${pi}" value="${esc(t.players[pi].hcp)}" placeholder="Index"/>
+      </div>`).join('')}
+    </div>`).join('') || '<div class="text-sm text-[#9db3a4]">No teams yet.</div>'}
+  </div>
+  <div class="flex gap-2">
+    <button data-action="add-team" class="btn on flex-1">+ Add Team</button>
+    <button data-action="demo-teams" class="btn flex-1">Load Demo Teams</button>
+  </div>
+  <p class="text-[11px] text-[#66786b]">Enter each player's Handicap Index. Course Handicap and the ${STATE.allowancePct}% allowance are calculated per round from the course slope/rating.</p>`;
+}
+function adminRounds(){
+  return `
+  <div class="card p-3 space-y-2">
+    <div class="font-semibold text-sm">Rounds</div>
+    ${STATE.rounds.map(r=>`<div class="flex gap-2">
+      <input class="fld" data-edit="round-name" data-r="${r.id}" value="${esc(r.name)}"/>
+      <select class="fld" data-edit="round-course" data-r="${r.id}">${STATE.courses.map(c=>`<option value="${c.id}" ${c.id===r.courseId?'selected':''}>${esc(c.name)}</option>`).join('')}</select>
+    </div>`).join('')}
+  </div>
+  ${STATE.courses.map(c=>`
+  <div class="card p-3 space-y-2">
+    <div class="flex gap-2"><input class="fld" data-edit="course-name" data-c="${c.id}" value="${esc(c.name)}"/>${STATE.courses.length>1?`<button data-action="del-course" data-c="${c.id}" class="btn warn">Delete</button>`:''}</div>
+    <div class="flex gap-2 text-[11px] text-[#7f9689]">
+      <label class="flex-1">Rating<input class="fld" type="number" step="0.1" data-edit="course-rating" data-c="${c.id}" value="${c.rating}"/></label>
+      <label class="flex-1">Slope<input class="fld" type="number" data-edit="course-slope" data-c="${c.id}" value="${c.slope}"/></label>
+    </div>
+    <div class="overflow-x-auto"><table class="text-[10px] text-center" style="min-width:640px">
+      <tr class="text-[#7f9689]"><td></td>${c.pars.map((_,i)=>`<td>${i+1}</td>`).join('')}</tr>
+      <tr><td class="text-[#7f9689] pr-1">Par</td>${c.pars.map((v,i)=>`<td><input class="fld" style="padding:3px;text-align:center;width:32px" type="number" data-edit="course-par" data-c="${c.id}" data-i="${i}" value="${v}"/></td>`).join('')}</tr>
+      <tr><td class="text-[#7f9689] pr-1">SI</td>${c.sis.map((v,i)=>`<td><input class="fld" style="padding:3px;text-align:center;width:32px" type="number" data-edit="course-si" data-c="${c.id}" data-i="${i}" value="${v}"/></td>`).join('')}</tr>
+    </table></div>
+  </div>`).join('')}
+  <button data-action="add-course" class="btn w-full">+ Add Course</button>`;
+}
+function adminSetup(){
+  return `
+  <div class="card p-3 space-y-2">
+    <label class="text-[11px] text-[#7f9689] block">Event title<input class="fld" data-edit="title" value="${esc(STATE.title)}"/></label>
+    <label class="text-[11px] text-[#7f9689] block">Handicap allowance % (of Course Handicap)<input class="fld" type="number" data-edit="allow" value="${STATE.allowancePct}"/></label>
+    <label class="text-[11px] text-[#7f9689] block">Admin passcode<input class="fld" data-edit="passcode" value="${esc(STATE.passcode)}"/></label>
+  </div>
+  <div class="card p-3 space-y-2">
+    <button data-action="reset-scores" class="btn warn w-full">Reset All Scores</button>
+    <button data-action="reset-all" class="btn warn w-full">Reset Entire Tournament</button>
+    <button data-action="export" class="btn w-full">Export Data (JSON)</button>
+  </div>
+  <div class="card p-3 text-[11px] text-[#9db3a4] space-y-2">
+    <div class="font-semibold text-[#e6efe8]">Database setup (run once in Supabase SQL editor)</div>
+    <pre class="whitespace-pre-wrap text-[10px] p-2 rounded-lg" style="background:#0e1712">create table if not exists ${esc(SUPABASE_TABLE)} (
+  id int primary key,
+  data jsonb,
+  updated_at timestamptz default now()
+);
+alter table ${esc(SUPABASE_TABLE)} enable row level security;
+create policy "open access" on ${esc(SUPABASE_TABLE)}
+  for all using (true) with check (true);
+alter publication supabase_realtime add table ${esc(SUPABASE_TABLE)};</pre>
+    <div>Table: <b>${esc(SUPABASE_TABLE)}</b> · Channel: <b>${esc(SUPABASE_CHANNEL)}</b></div>
+  </div>`;
+}
+
+/* =========================================================
+   ACTIONS
+   ========================================================= */
+function setScore(f, value){
+  const row = STATE.scores[UI.round][UI.team][UI.hole];
+  row[f] = value;
+  commit();
+}
+function confirmModal(msg, onYes, needWord){
+  const root = document.getElementById('modalRoot');
+  root.innerHTML = `<div class="fixed inset-0 z-50 flex items-center justify-center p-6" style="background:rgba(0,0,0,.7)">
+    <div class="card p-5 w-full max-w-sm space-y-3" style="background:#101a14">
+      <div class="text-sm">${esc(msg)}</div>
+      ${needWord?`<input id="confirmWord" class="fld" placeholder="Type ${needWord}" style="font-size:16px"/>`:''}
+      <div class="flex gap-2"><button id="cNo" class="btn flex-1">Cancel</button><button id="cYes" class="btn warn flex-1">Confirm</button></div>
+    </div></div>`;
+  document.getElementById('cNo').onclick = ()=>{ root.innerHTML=''; };
+  document.getElementById('cYes').onclick = ()=>{
+    if(needWord){ const w=document.getElementById('confirmWord').value.trim(); if(w!==needWord) return; }
+    root.innerHTML=''; onYes();
+  };
+}
+
+document.addEventListener('click', e=>{
+  const el = e.target.closest('[data-action]');
+  if(!el || el.tagName==='SELECT') return;
+  const a = el.dataset.action;
+  try{
+  if(a==='tab'){ UI.tab=el.dataset.tab; render(); flushQueued(); }
+  else if(a==='metric'){ UI.metric=el.dataset.m; render(); }
+  else if(a==='round'){ UI.round=el.dataset.id; render(); }
+  else if(a==='hole'){ UI.hole=parseInt(el.dataset.i,10); render(); }
+  else if(a==='adj'){
+    const f=el.dataset.f, d=parseInt(el.dataset.d,10);
+    const round=roundById(UI.round), par=courseById(round.courseId).pars[UI.hole];
+    const cur=num(STATE.scores[UI.round][UI.team][UI.hole][f]);
+    setScore(f, cur==null ? par : Math.max(1, cur+d));
+  }
+  else if(a==='par'){ const round=roundById(UI.round); setScore(el.dataset.f, courseById(round.courseId).pars[UI.hole]); }
+  else if(a==='clr'){ setScore(el.dataset.f, ''); }
+  else if(a==='admin-login'){
+    const v=(document.getElementById('adminPass').value||'').trim();
+    if(v===String(STATE.passcode)){ adminAuthenticated=true; try{sessionStorage.setItem(ADMIN_KEY,'1');}catch(e){} render(); flushQueued(); }
+    else document.getElementById('adminErr').textContent='Incorrect passcode';
+  }
+  else if(a==='admin-lock'){ adminAuthenticated=false; try{sessionStorage.removeItem(ADMIN_KEY);}catch(e){} render(); }
+  else if(a==='admin-tab'){ UI.adminTab=el.dataset.t; render(); }
+  else if(a==='add-team'){ STATE.teams.push({ id:uid('t'), name:'Team '+(STATE.teams.length+1), players:[{name:'',hcp:''},{name:'',hcp:''}] }); ensureScores(); commit(); }
+  else if(a==='demo-teams'){
+    const names=[['Alpha','Ace','Ben',8,14],['Bravo','Cal','Dan',5,18],['Charlie','Eli','Finn',12,9],['Delta','Gus','Hank',20,6],['Echo','Ian','Jack',15,15],['Foxtrot','Kyle','Lou',10,22]];
+    names.forEach(n=>STATE.teams.push({ id:uid('t'), name:'Team '+n[0], players:[{name:n[1],hcp:n[3]},{name:n[2],hcp:n[4]}] }));
+    ensureScores(); commit();
+  }
+  else if(a==='del-team'){ const id=el.dataset.t; confirmModal('Delete this team and all its scores?', ()=>{ STATE.teams=STATE.teams.filter(t=>t.id!==id); Object.values(STATE.scores).forEach(r=>delete r[id]); commit(); }); }
+  else if(a==='add-course'){ STATE.courses.push({ id:uid('c'), name:'New Course', rating:71.5, slope:125, pars:DEFAULT_PARS.slice(), sis:DEFAULT_SIS.slice() }); commit(); }
+  else if(a==='del-course'){ const id=el.dataset.c; STATE.courses=STATE.courses.filter(c=>c.id!==id); STATE.rounds.forEach(r=>{ if(r.courseId===id) r.courseId=STATE.courses[0].id; }); commit(); }
+  else if(a==='reset-scores'){ confirmModal('Clear every score for all teams and rounds?', ()=>{ STATE.scores={}; ensureScores(); commit(); }, 'RESET'); }
+  else if(a==='reset-all'){ confirmModal('Delete ALL teams, scores and settings and start over?', ()=>{ const pass=STATE.passcode; STATE=defaultState(); STATE.passcode=pass; ensureScores(); UI.team=null; commit(); }, 'RESET'); }
+  else if(a==='export'){
+    const blob=new Blob([JSON.stringify(STATE,null,2)],{type:'application/json'});
+    const link=document.createElement('a'); link.href=URL.createObjectURL(blob); link.download='turtle-2man-export.json'; link.click();
+  }
+  }catch(err){ console.error(err); }
+});
+document.addEventListener('change', e=>{
+  const el=e.target;
+  if(el.dataset.action==='team-select'){ UI.team=el.value; render(); return; }
+  const k=el.dataset.edit; if(!k) return;
+  const T=id=>STATE.teams.find(t=>t.id===id), C=id=>STATE.courses.find(c=>c.id===id), R=id=>STATE.rounds.find(r=>r.id===id);
+  if(k==='team-name') T(el.dataset.t).name=el.value;
+  else if(k==='p-name') T(el.dataset.t).players[+el.dataset.p].name=el.value;
+  else if(k==='p-hcp') T(el.dataset.t).players[+el.dataset.p].hcp = el.value===''?'':Number(el.value);
+  else if(k==='round-name') R(el.dataset.r).name=el.value||'Round';
+  else if(k==='round-course') R(el.dataset.r).courseId=el.value;
+  else if(k==='course-name') C(el.dataset.c).name=el.value;
+  else if(k==='course-rating') C(el.dataset.c).rating=Number(el.value)||72;
+  else if(k==='course-slope') C(el.dataset.c).slope=Math.max(55,Math.min(155,Number(el.value)||113));
+  else if(k==='course-par') C(el.dataset.c).pars[+el.dataset.i]=Math.max(3,Math.min(6,parseInt(el.value,10)||4));
+  else if(k==='course-si') C(el.dataset.c).sis[+el.dataset.i]=Math.max(1,Math.min(18,parseInt(el.value,10)||1));
+  else if(k==='title') STATE.title=el.value||'Turtle Classic — 2-Man Better Ball';
+  else if(k==='allow') STATE.allowancePct=Math.max(0,Math.min(100,Number(el.value)||80));
+  else if(k==='passcode') STATE.passcode=el.value||'1234';
+  commit(); flushQueued();
+});
+document.addEventListener('focusout', ()=>setTimeout(flushQueued, 50));
+
+/* =========================================================
+   BOOT
+   ========================================================= */
+loadLocal();
+if(!UI.team && STATE.teams[0]) UI.team = STATE.teams[0].id;
+render();
+connect();
+</script>
+</body>
+</html>
